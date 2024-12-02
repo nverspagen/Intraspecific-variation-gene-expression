@@ -1,0 +1,255 @@
+---
+title: "broadSeq_QC"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_notebook: 
+    toc: yes
+    toc_float: true
+    code_folding: hide
+---
+Quality check with broadseq
+
+First, read packages and initialize functions
+```{r}
+options(encoding = "UTF-8")
+rm(list=ls())
+# .libPaths()
+loadpackages <- function(){
+  require(GOplot) # install.packages("GOplot",  repos='http://cran.r-project.org')
+  library(tximport)
+  library(broadSeq) # devtools::install_github("dasroy/broadSeq")
+  library(ggplot2)
+  library(dplyr)
+}
+
+suppressPackageStartupMessages(loadpackages())
+
+give.n <- function(x){
+  return(c(y = max(x)+1, label = length(x))) 
+  # experiment with the multiplier to find the perfect position
+}
+
+round_df <- function(df, digits) {
+  nums <- vapply(df, is.numeric, FUN.VALUE = logical(1))
+  df[,nums] <- round(df[,nums], digits = digits)
+  (df)
+}
+```
+
+Read all the sample information
+```{r }
+#Read the data matrix
+condition <- read.table("Data_matrix_RNAseq.csv",stringsAsFactors=FALSE,header=T, sep=",")
+
+#Sort by sample ID
+condition <- condition %>% dplyr::arrange(ID)
+
+#Fix structure of the data
+condition$Family <- factor(condition$Family)
+condition$Temperature <- factor(condition$Temperature)
+condition$Population <- factor(condition$Population)
+condition$Sex <- factor(condition$Sex)
+condition$Sampling.day <- factor(condition$Sampling.day)
+condition$Average.group.development.time <- factor(condition$Average.group.development.time )
+condition$Proportion.completed.development <- factor(condition$Proportion.completed.development)
+condition$Mass.day.8 <- factor(condition$Mass.day.8)
+condition$Mass.day.12 <- factor(condition$Mass.day.12)
+condition$Mass.closest.sampling.day <- factor(condition$Mass.closest.sampling.day)
+condition$PopTemp <- factor(paste0(condition$Population, condition$Temperature))
+
+#Read data about the flowcel lane
+flowCel_lane <- readxl::read_xlsx(path = "F22FTSEUHT0133_MELdeyuR.xlsx") %>% as.data.frame()
+
+#Fix column names
+colnames(flowCel_lane) <- colnames(flowCel_lane) %>% gsub(pattern = " ",replacement = "_")
+
+#Add sample ID
+flowCel_lane$ID <- flowCel_lane$Sample_name %>% sub(pattern = "[0-9]+_",replacement = "",perl = TRUE) 
+
+#Remove duplicates
+flowCel_lane <- flowCel_lane[!duplicated(flowCel_lane$ID),]
+
+#Add flow cel lane info to the data matrix and write the file
+condition <- condition %>% left_join(flowCel_lane[,c("ID", "Flow_cell_name", "Lane_number")])
+write.csv(condition,file = "RNAseq_sample_info.csv",row.names = FALSE )
+
+#Set sample ID as the rownames
+rownames(condition) <- condition$ID
+```
+
+Combine sample information with count data
+```{r message=FALSE, warning=FALSE}
+# Set directory to ../raw_data/reverse_cinxia_rnaseq_out_0623/star_salmon/AF_132_25_68a_1/quant.genes.sf
+dir <- "../../raw_data/reverse_cinxia_rnaseq_out_0623/star_salmon"
+
+#save the file paths to all quant.genes.sf files 
+files <- file.path(dir,  condition$ID, "quant.genes.sf")
+names(files) <- condition$ID
+
+#Import all the files
+txi.salmon <- tximport(files, type = "salmon",txOut=TRUE,)
+
+#Change name of abundance column to TPM
+names(txi.salmon)[1]<-"TPM"
+
+#Read a file with cinxia gene IDs and corresponding drosophila gene names (only for those where a drosophila ortholog exists)
+gene_names  <- read.delim("/scratch/project_2006045/rishi/rnaseq_butterfly/blast_results_final.txt",stringsAsFactors = FALSE)
+
+#Add a column that includes the cinxia gene ID without suffix and remove duplicates
+gene_names <- gene_names %>% mutate(gene_id = stringr::str_extract(subject_y, "[^-]*"))
+gene_names <- gene_names[!duplicated(gene_names$gene_id),]
+# gene_names %>% filter(gene_id %in% gene_id[duplicated(gene_id)]) %>% head()
+
+#Make a dataframe with all cinxia gene IDs
+gene_info_df <- data.frame(gene_id=rownames(txi.salmon[[1]]))
+
+#add drosophila gene names when present
+gene_info_df <- gene_info_df %>% left_join(gene_names,by=c("gene_id"="gene_id"))
+gene_info_df$name_id <- paste(gene_info_df$name,gene_info_df$gene_id,sep = "-")
+
+#add a column dros_name with the drosophila gene name. If not present, use cinxia gene ID
+gene_info_df <- gene_info_df %>% mutate(dros_name = ifelse(is.na(name),gene_id,name))
+rownames(gene_info_df) <- gene_info_df$gene_id
+
+#Combine the sample info (data matrix) and count data for all the genes together in one summarized experiment data object
+smrExpt <-
+    SummarizedExperiment::SummarizedExperiment(assays = txi.salmon[1:3],
+                                               colData = condition[colnames(txi.salmon[[1]]), ],
+                                               rowData = gene_info_df[rownames(txi.salmon[[1]]), ])
+
+#Check how many genes are there in total
+print(paste("Number of genes", nrow(smrExpt)))
+```
+
+Filter out low expressing genes
+```{r}
+#Select only genes with higher count than 5
+highExpressedGenes <- rowSums( assays(smrExpt)[["counts"]] >= 5 ) >= 80
+
+#Print the number of genes with lower count than 5
+print(paste("Number of low expressed genes",sum(!highExpressedGenes)))
+
+#Save a summarized experiment object with all genes
+smrExptOrg <- smrExpt
+
+#Remove the lowly expressed genes from the summarized experiment
+smrExpt <- smrExpt[highExpressedGenes,]
+
+#Print how many genes were retained
+print(paste("Number of genes retained", nrow(smrExpt)))
+```
+
+DESeq2 provides variance stabilizing transformation (VST) and rlog. We use rlog because it performs better. We also remove an outlier (see wgcna script for further explanation)
+```{r}
+#Perform vst normalization
+smrExpt <- broadSeq::transformDESeq2(smrExpt,method = "vst" )
+
+#Perform rlog normalization
+smrExpt <- broadSeq::transformDESeq2(smrExpt,method = "rlog" )
+SummarizedExperiment::assayNames(smrExpt)
+
+#remove outlier (from wgcna script)
+smrExpt <- smrExpt[, smrExpt$ID != "AF_142_34_117b_1"]
+
+#Add the normalized counts to the summarized experiment
+assays(smrExpt)[["vst"]] %>% boxplot(main="Vst",xaxt="n",xlab="samples")
+assays(smrExpt)[["rlog"]] %>% boxplot(main="rLog",xaxt="n",xlab="samples")
+```
+
+Select the 2000 most variable genes
+```{r}
+ntop=2000
+```
+
+MDS plot
+```{r}
+
+#Initial PCA plot (PC1 and 2) with the 2000 most variable genes
+broadSeq::plot_MDS(smrExpt, scaledAssay = "rlog", ntop=2000, color= "Population", size =  "Temperature",labelBY = "ID")
+```
+
+Hierarchical & Heatmap
+```{r}
+p<-broadSeq::plotHeatmapCluster(smrExpt ,scaledAssay = "vst", annotation_col = c("Population", "Temperature"),
+                                ntop = 2000, cluster_rows=FALSE, show_rownames=FALSE,
+                                show_colnames = FALSE, cluster_cols=TRUE, main="Top 2000 variable gene VST")
+
+p<-broadSeq::plotHeatmapCluster(smrExpt ,scaledAssay = "rlog", annotation_col = c("Population", "Temperature"),
+                                ntop = 2000, cluster_rows=FALSE, show_rownames=FALSE,
+                                show_colnames = FALSE, cluster_cols=TRUE, main="Top 2000 variable gene rlog")
+
+```
+The rlog transformation generates a very different heatmap than vst. This is due to different set of genes are marked most variable by these two methods that we can see in PCA plot.
+```{r warning=FALSE}
+#Compute PCA with rlog
+computedPCA_rlog <- broadSeq::prcompTidy(smrExpt, scaledAssay = "rlog",ntop = ntop)
+
+#Compute PCA with vst
+computedPCA_vst <- broadSeq::prcompTidy(smrExpt, scaledAssay = "vst",ntop = ntop)
+
+#Look at the overlap in PCA between rlog and vst
+gplots::venn(list(vst=(computedPCA_vst$original %>% rownames()),rlog= (computedPCA_rlog$original %>% rownames())))
+```
+Check variance explained by each axis
+```{r}
+computedPCA_rlog$eigen_values %>%
+        dplyr::filter(var_exp >= 1) %>%
+    ggplot()+geom_col(aes(x=PC,y=var_exp),width = 0.5)+
+    geom_line(aes(PC,cum_var*100,group=1,
+                  colour="Cumulative\nexplained\nvariance"))+
+    guides(colour=guide_legend(title = "",title.position = "top"))+
+    labs(y="Variance Explained (%)",x="Principal Components")
+
+```
+
+Plot different PCs against each other, and produce figure S3
+```{r}
+#Plot PC1, 2 and 3 against each other
+pc_1_2 <- plotAnyPC(computedPCA = computedPCA_rlog,x = 1, y = 2,  color = "Population", size="Population", shape = "Temperature")
+pc_1_3 <- plotAnyPC(computedPCA = computedPCA_rlog,x = 1, y = 3,  color = "Population", size="Temperature", shape = "Temperature")
+pc_2_3 <- plotAnyPC(computedPCA = computedPCA_rlog,x = 2, y = 3,  color = "Population", size="Temperature", shape = "Temperature")
+
+p <- ggpubr::ggarrange(pc_1_2,pc_1_3,common.legend = TRUE,legend = "bottom")
+p
+
+#Make Figure S3
+
+#Make the PCs into a dataframe
+PCs <- as.data.frame(computedPCA_rlog[["pc_scores"]])
+
+#Add a poptemp column
+PCs$sextemp <- paste(PCs$Sex, PCs$Temperature, sep = "_")
+
+p <- ggplot(PCs, aes(PC1, PC3, size = Population, fill = Family, col = Family, shape = sextemp)) +
+  geom_point() +
+  scale_shape_manual(values = c(1, 2, 16, 17)) +
+  theme_bw() +
+   xlab("PC1 (34.05%)") + ylab("PC2 (5.96%)") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+ggsave("FigureS3.png", plot = p, width = 20, height = 15, units = "cm")
+
+```
+Save count data
+```{r}
+saveRDS(smrExptOrg, file = "smrExptOrg.rds")
+saveRDS(smrExpt, file = "smrExpt_filtered.rds")
+```
+
+<details>
+
+<summary>
+
+<p style="color:red">
+
+sessionInfo
+
+</p>
+
+</summary>
+
+```{r echo=FALSE,message=FALSE,warning=FALSE,error=FALSE}
+sessionInfo()
+```
+
+</details>

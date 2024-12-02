@@ -1,0 +1,306 @@
+---
+title: "BroadSeq_DE_Nadja"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_notebook: 
+    toc: yes
+    toc_float: true
+    code_folding: hide
+---
+
+Differentially expressed genes for temperature, population and their interaction
+
+
+Loading data and packages, set general variables
+```{r}
+options(encoding = "UTF-8")
+rm(list=ls())
+
+loadpackages <- function(){
+  require(GOplot) # install.packages("GOplot",  repos='http://cran.r-project.org')
+  library(tximport)
+  library(broadSeq)
+  library(ggplot2)
+  library(dplyr)
+  library(tidyr)
+  library(glmmSeq)
+}
+
+suppressPackageStartupMessages(loadpackages())
+
+give.n <- function(x){
+  return(c(y = max(x)+1, label = length(x))) 
+  # experiment with the multiplier to find the perfect position
+}
+
+round_df <- function(df, digits) {
+  nums <- vapply(df, is.numeric, FUN.VALUE = logical(1))
+  df[,nums] <- round(df[,nums], digits = digits)
+  (df)
+}
+
+smrExpt <- readRDS("smrExpt_filtered.rds")
+
+pValue <- 0.05
+
+```
+
+Set up dds models
+
+##Temperature
+
+Here we get the results for significantly differentially expressed genes between 2 temperatures and plot the 4 most significant genes
+```{r warning=FALSE}
+#Save the summarized experiment (raw counts and experimental design/matrix) in the DESeq format. Here we define that we want to look at only the effect of temperature
+dds <- DESeq2::DESeqDataSet(smrExpt, design = ~ Temperature)
+
+#Do the DE analysis based on the Negative Binomial (a.k.a. Gamma-Poisson) distribution
+dds_res <- DESeq2::DESeq(dds)
+
+#Save the differentially expressed genes (p < 0.05) as obtained by the DEseq analysis for the 2 temperature contrasts (25 and 34 degrees). A positive logFC means that the gene is upregulated at the higher temperature, and vice versa. We only save those genes with a log-foldchange of more than 1 and log-foldchange SE of less than 0.5 (i.e., only those genes with a large enough effect size are saved) 
+res_temp <- DESeq2::results(dds_res, alpha=pValue, contrast=c("Temperature", "34", "25"),tidy = TRUE, saveCols = "dros_name")  %>% 
+  rename("row"="ID", "log2FoldChange"="logFC")%>%
+    dplyr::filter( !is.na(padj) & abs(logFC) > 1 & lfcSE < 0.5 )
+
+#Print the number of differentially expressed genes
+res_temp  %>% nrow() %>% paste("significant genes affected by temperature")
+
+#Take the 4 most significantly differentially expressed genes
+top_gene_temp <- res_temp  %>% arrange(padj) %>% dplyr::group_by(sign(logFC)) %>% dplyr::slice(1:2) %>% pull(ID)
+
+#Plot their normalised counts
+broadSeq::genes_plot(smrExpt, features = top_gene_temp, x = "PopTemp",y = "rlog", fill=  "PopTemp",palette = "jco")+theme_classic()
+
+#Show them in a table
+res_temp %>%  arrange(padj) %>%
+  select(dros_name,padj,logFC,lfcSE,ID) %>% 
+  dplyr::group_by(sign(logFC)) %>% dplyr::slice(1:2) 
+```
+
+##Population
+
+Here we get the results for significantly differentially expressed genes between 2 populations and plot the 4 most significant genes
+```{r warning = FALSE}
+#This gets the significantly differentially expressed genes between the 2 populations (p < 0.05). A positive logFC means that the gene is upregulatedin CAT compared to AF, and vice versa. We only select the genes with an absolute logFC > 1 and a logFC SE of < 0.5
+
+#Save the summarized experiment (raw counts and experimental design/matrix) in the DESeq format. Here we define that we want to look at only the effect of population
+dds <- DESeq2::DESeqDataSet(smrExpt, design = ~ Population)
+
+#Do the DE analysis based on the Negative Binomial (a.k.a. Gamma-Poisson) distribution
+dds_res <- DESeq2::DESeq(dds)
+
+#Save the differentially expressed genes (p < 0.05) as obtained by the DEseq analysis for the 2 population contrasts (CAT = Spain and AL = Finland). A positive logFC means that the gene is upregulated in Spain, a negative logFC means that the gene is upregulated in Finland. We only save those genes with a log-foldchange of more than 1 and log-foldchange SE of less than 0.5 (i.e., only those genes with a large enough effect size are saved) 
+res_pop <- DESeq2::results(dds_res, alpha=pValue, contrast=c("Population", "CAT", "AF"),tidy = TRUE, saveCols = "dros_name")  %>% 
+  rename("row"="ID", "log2FoldChange"="logFC")%>%
+    dplyr::filter( !is.na(padj) & abs(logFC) > 1 & lfcSE < 0.5 )
+
+#Print the number of differentially expressed genes
+res_pop  %>% nrow() %>% paste("significant genes affected by population")
+
+#Take the 4 most significantly differentially expressed genes
+top_gene_pop <- res_pop  %>% arrange(padj) %>% dplyr::group_by(sign(logFC)) %>% dplyr::slice(1:2) %>% pull(ID)
+
+#Plot their normalised counts
+broadSeq::genes_plot(smrExpt, features = top_gene_pop, x = "PopTemp",y = "rlog", fill=  "PopTemp",palette = "jco")+theme_classic()
+
+#Show them in a table
+res_pop %>%  arrange(padj) %>%
+  select(dros_name,padj,logFC,lfcSE,ID) %>% 
+  dplyr::group_by(sign(logFC)) %>% dplyr::slice(1:2) 
+```
+
+##Population x Temperature interaction
+
+Here we get the results for the significantly differentially expressed genes for the interaction between population and temperature (i.e. gene expression responds differently to temperature in AF compared to CAT)
+```{r warning = FALSE}
+#This gets the significantly differentially expressed genes for the interaction between population and temperature (p < 0.05). Not sure what the values for logFC mean in this context. Maybe if the value is positive, the reaction norm slope is steeper in AF than in CAT and vice versa. We only select the genes with an absolute logFC > 1 and a logFC SE of < 0.5
+
+#Save the summarized experiment (raw counts and experimental design/matrix) in the DESeq format. Here we define that we want to look at the interaction between temperature and population
+dds <- DESeq2::DESeqDataSet(smrExpt, design = ~ Population + Temperature + Population:Temperature)
+
+#Do the DE analysis based on the Negative Binomial (a.k.a. Gamma-Poisson) distribution
+dds_res <- DESeq2::DESeq(dds)
+
+#Save the differentially expressed genes (p < 0.05) as obtained by the DEseq analysis for the interaction between temperature and population. It's not entirely clear what the values for logFC mean in this contect. We only save those genes with a log-foldchange of more than 1 and log-foldchange SE of less than 0.5 (i.e., only those genes with a large enough effect size are saved) 
+res_int <- DESeq2::results(dds_res, alpha=pValue, name= "PopulationCAT.Temperature34", tidy = TRUE, saveCols = "dros_name")  %>% 
+  rename("row"="ID", "log2FoldChange"="logFC") %>% 
+  dplyr::filter( !is.na(padj) & abs(logFC) >1 & lfcSE < 0.5 )
+
+#Print the number of differentially expressed genes
+res_int  %>% nrow() %>% paste("significant genes affected by the interaction between population and temperature")
+
+#Take the 4 most significantly differentially expressed genes
+top_gene_int <- res_int  %>% arrange(padj) %>% dplyr::group_by(sign(logFC)) %>% dplyr::slice(1:2) %>% pull(ID)
+
+#Plot their normalised counts
+broadSeq::genes_plot(smrExpt, features = top_gene_int, x = "PopTemp",y = "rlog", fill=  "PopTemp",palette = "jco")+theme_classic()
+
+#Show them in a table
+res_int %>%  arrange(padj) %>%
+  select(dros_name,padj,logFC,lfcSE,ID) %>% 
+  dplyr::group_by(sign(logFC)) %>% dplyr::slice(1:2) 
+```
+
+## Venn diagram
+
+This script produces the data for Figure 1
+```{r}
+#We want to make a Venn diagram that shows the number of genes for each model term (temperature, population or their interaction), and how they overlap (i.e. are some genes differentially expressed for both temperature and population, temperature and interaction etc.)
+
+colnames(res_int)[2:7] <- paste(colnames(res_int)[2:7], "int", sep = "_")
+colnames(res_temp)[2:7] <- paste(colnames(res_temp)[2:7], "temp", sep = "_")
+colnames(res_pop)[2:7] <- paste(colnames(res_pop)[2:7], "pop", sep = "_")
+
+#Get three-way overlap by merging the three files and only keeping the genes that are present in all three
+InteractionTemperaturePopulation <- merge(res_int, res_temp, by = c("ID", "dros_name"))
+InteractionTemperaturePopulation <- merge(InteractionTemperaturePopulation, res_pop, by = c("ID", "dros_name"))
+
+#Get two-way overlap interaction and temperature by first merging the interaction and temperature dataframes while only keeping the common genes, and then removing genes present in the three-way overlap dataframe
+InteractionTemperature <- merge(res_int, res_temp, by = c("ID", "dros_name"))
+InteractionTemperature$baseMean_pop <- NA
+InteractionTemperature$logFC_pop <- NA
+InteractionTemperature$lfcSE_pop <- NA
+InteractionTemperature$stat_pop <- NA
+InteractionTemperature$pvalue_pop <- NA
+InteractionTemperature$padj_pop <- NA
+InteractionTemperature <- rbind(InteractionTemperature, InteractionTemperaturePopulation)
+InteractionTemperature <- as.data.frame(InteractionTemperature[!(duplicated(InteractionTemperature$ID) | duplicated(InteractionTemperature$ID, fromLast = TRUE)), ])
+names(InteractionTemperature)[1] = "ID"
+
+#Get two-way overlap interaction and population by first merging the interaction and population dataframes while only keeping the common genes, and then removing genes present in the three-way overlap dataframe
+InteractionPopulation <- merge(res_int, res_pop, by = c("ID", "dros_name"))
+InteractionPopulation$baseMean_temp <- NA
+InteractionPopulation$logFC_temp <- NA
+InteractionPopulation$lfcSE_temp <- NA
+InteractionPopulation$stat_temp <- NA
+InteractionPopulation$pvalue_temp <- NA
+InteractionPopulation$padj_temp <- NA
+InteractionPopulation <- rbind(InteractionPopulation, InteractionTemperaturePopulation)
+InteractionPopulation <- as.data.frame(InteractionPopulation[!(duplicated(InteractionPopulation$ID) | duplicated(InteractionPopulation$ID, fromLast = TRUE)), ])
+names(InteractionPopulation)[1] = "ID"
+
+#Get two-way overlap Temperature and population by first merging the temperature and population dataframes while only keeping the common genes, and then removing genes present in the three-way overlap dataframe
+TemperaturePopulation <- merge(res_temp, res_pop, by = c("ID", "dros_name"))
+TemperaturePopulation$baseMean_int <- NA
+TemperaturePopulation$logFC_int <- NA
+TemperaturePopulation$lfcSE_int <- NA
+TemperaturePopulation$stat_int <- NA
+TemperaturePopulation$pvalue_int <- NA
+TemperaturePopulation$padj_int <- NA
+TemperaturePopulation <- rbind(TemperaturePopulation, InteractionTemperaturePopulation)
+TemperaturePopulation <- as.data.frame(TemperaturePopulation[!(duplicated(TemperaturePopulation$ID) | duplicated(TemperaturePopulation$ID, fromLast = TRUE)), ])
+names(TemperaturePopulation)[1] = "ID"
+
+res_int$baseMean_pop <- NA
+res_int$logFC_pop <- NA
+res_int$lfcSE_pop <- NA
+res_int$stat_pop <- NA
+res_int$pvalue_pop <- NA
+res_int$padj_pop <- NA
+res_int$baseMean_temp <- NA
+res_int$logFC_temp <- NA
+res_int$lfcSE_temp <- NA
+res_int$stat_temp <- NA
+res_int$pvalue_temp <- NA
+res_int$padj_temp <- NA
+
+res_temp$baseMean_pop <- NA
+res_temp$logFC_pop <- NA
+res_temp$lfcSE_pop <- NA
+res_temp$stat_pop <- NA
+res_temp$pvalue_pop <- NA
+res_temp$padj_pop <- NA
+res_temp$baseMean_int <- NA
+res_temp$logFC_int <- NA
+res_temp$lfcSE_int <- NA
+res_temp$stat_int <- NA
+res_temp$pvalue_int <- NA
+res_temp$padj_int <- NA
+
+res_pop$baseMean_int <- NA
+res_pop$logFC_int <- NA
+res_pop$lfcSE_int <- NA
+res_pop$stat_int <- NA
+res_pop$pvalue_int <- NA
+res_pop$padj_int <- NA
+res_pop$baseMean_temp <- NA
+res_pop$logFC_temp <- NA
+res_pop$lfcSE_temp <- NA
+res_pop$stat_temp <- NA
+res_pop$pvalue_temp <- NA
+res_pop$padj_temp <- NA
+
+#Get Interaction circle without overlap
+Interaction <- rbind(res_int, InteractionTemperaturePopulation, InteractionTemperature, InteractionPopulation)
+Interaction <- as.data.frame(Interaction[!(duplicated(Interaction$ID) | duplicated(Interaction$ID, fromLast = TRUE)), ])
+names(Interaction)[1] = "ID"
+
+#Get Temperature circle without overlap
+Temperature <- rbind(res_temp, InteractionTemperaturePopulation, InteractionTemperature, TemperaturePopulation)
+Temperature <- as.data.frame(Temperature[!(duplicated(Temperature$ID) | duplicated(Temperature$ID, fromLast = TRUE)), ])
+names(Temperature)[1] = "ID"
+
+#Get Population circle without overlap
+Population <- rbind(res_pop, InteractionTemperaturePopulation, InteractionPopulation, TemperaturePopulation)
+Population <- as.data.frame(Population[!(duplicated(Population$ID) | duplicated(Population$ID, fromLast = TRUE)), ])
+names(Population)[1] = "ID"
+
+Interaction[, "Variable"] = "Interaction"
+Temperature[, "Variable"] = "Temperature"
+Population[, "Variable"] = "Population"
+
+InteractionTemperature[, "Variable"] = "InteractionTemperature"
+InteractionPopulation[, "Variable"] = "InteractionPopulation"
+TemperaturePopulation[, "Variable"] = "TemperaturePopulation"
+
+InteractionTemperaturePopulation[, "Variable"] = "InteractionTemperaturePopulation"
+
+rownames(Interaction) = Interaction$ID
+rownames(Temperature) = Temperature$ID
+rownames(Population) = Population$ID
+
+rownames(InteractionTemperature) = InteractionTemperature$ID
+rownames(InteractionPopulation) = InteractionPopulation$ID
+rownames(TemperaturePopulation) = TemperaturePopulation$ID
+
+rownames(InteractionTemperaturePopulation) = InteractionTemperaturePopulation$ID
+
+VennData <- rbind(Interaction, Temperature, Population, InteractionTemperature, InteractionPopulation, TemperaturePopulation, InteractionTemperaturePopulation)
+
+write.csv(VennData, "Significant_genes.csv",row.names = FALSE)
+
+```
+
+##HSPs
+
+HSPs are known to be related to temperature stress, so we want to look at how they are differentially expressed
+```{r}
+
+#Make a list of genes related to heat shock proteins (from annotation file)
+HSPs <- c("MCINX2_00000203", "MCINX2_00001323", "MCINX2_00001623", "MCINX2_00002599", "MCINX2_00002750", "MCINX2_00003058", "MCINX2_00003059", "MCINX2_00005852", "MCINX2_00005882", "MCINX2_00005962", "MCINX2_00008318", "MCINX2_00008390", "MCINX2_00008752", "MCINX2_00009994", "MCINX2_00011264", "MCINX2_00012269", "MCINX2_00012326", "MCINX2_00012346", "MCINX2_00012348", "MCINX2_00012367", "MCINX2_00012844", "MCINX2_00014568")
+
+#Read unfiltered summarized experiment so that all HSPs are included (even lowly expressed ones)
+smrExptOrg <- readRDS("smrExptOrg.rds")
+
+#Transform with rlog
+smrExptOrg <- broadSeq::transformDESeq2(smrExptOrg,method = "rlog" )
+
+#Plot rlog transformed counts for the HSP genes
+p <- broadSeq::genes_plot(smrExptOrg, features = HSPs, x = "Temperature",y = "rlog", fill=  "Population", group = "Population") + 
+  scale_fill_manual(values = c("#0f5b05", "#c76800"), labels = c("Finland", "Spain")) +
+  ylab("rlog transformed counts") +
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 14),
+        legend.position="bottom",
+        legend.key.size = unit(1, 'cm'),
+        legend.text = element_text(size = 14),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.background = element_blank(),
+        strip.text = element_text(size = 11),
+        axis.title.x = element_blank(),
+        legend.title=element_blank())
+
+ggsave("FigureS6_preprocessing.png", plot = p, width = 30, height = 30, units = "cm", bg = "white", dpi = 600)
+
+```

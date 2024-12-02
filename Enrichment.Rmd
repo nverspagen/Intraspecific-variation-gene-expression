@@ -1,0 +1,177 @@
+---
+title: "Enrichment analysis"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_notebook: 
+    toc: yes
+    toc_float: true
+    code_folding: hide
+---
+
+Read data and set up general functions and variables
+```{r echo=TRUE,message=FALSE,warning=FALSE}
+options(encoding = "UTF-8")
+rm(list = ls())
+# .libPath()
+library(clusterProfiler,verbose = FALSE)
+library(dplyr,verbose = FALSE)
+library(readr,verbose = FALSE)
+library(enrichplot,verbose = FALSE)
+
+#Read the gene annotations file. Downloaded from http://gigadb.org/dataset/view/id/100915/File_page/2 (PubMed: 35022701)
+Pannzer <- read_delim("Pannzer.out_2", delim = "\t", 
+    escape_double = FALSE, trim_ws = TRUE,progress = FALSE)
+
+#Read DE genes from gene-by-gene analysis
+de_genes <- read.csv("Significant_genes.csv")
+
+#Only keep single effects of temperature, population and interaction
+temperature <- de_genes[which(de_genes$Variable == "Temperature"), ]
+population <- de_genes[which(de_genes$Variable == "Population"), ]
+interaction <- de_genes[which(de_genes$Variable == "Interaction"), ]
+
+de_genes <- rbind(temperature, population, interaction)
+
+#Read WGCNA modules
+wgcna_genes <- read.csv("MergedModules_genes.csv")
+row.names(wgcna_genes) <- wgcna_genes$Gene
+wgcna_genes <- wgcna_genes[-1]
+
+#remove the grey module (= unassigned genes)
+wgcna_genes <- wgcna_genes[which(wgcna_genes$Module != "grey"), ]
+
+smrExpt <- readRDS("smrExptOrg.rds")
+allGenes <- rownames(smrExpt)
+
+#Create a function to round numbers to a certain amount of digits
+round_df <- function(df, digits) {
+  nums <- vapply(df, is.numeric, FUN.VALUE = logical(1))
+  df[,nums] <- round(df[,nums], digits = digits)
+  (df)
+}
+```
+
+Annotation
+```{r warning=FALSE,echo=TRUE}
+
+#Add annotation terms for each genes
+Pannzer_TERM2GENE <- Pannzer %>%
+   dplyr::mutate(gene_id = stringr::str_extract(qpid,"[^-]*"),term=paste(ontology,goid,sep="_")) %>% dplyr::select(term,gene_id,ontology)
+Pannzer_TERM2NAME <- Pannzer %>%
+   dplyr::mutate(gene_id = stringr::str_extract(qpid,"[^-]*"),term=paste(ontology,goid,sep="_")) %>% dplyr::select(term,desc,ontology)
+
+#Make a venn diagram to see how many terms we have for each ontology (de_genes)
+gplots::venn(list(de_genes = unique(de_genes$ID),
+                  avail_GO_BP = unique(subset(Pannzer_TERM2GENE,ontology=="BP")$gene_id),
+                  avail_GO_CC = unique(subset(Pannzer_TERM2GENE,ontology=="CC")$gene_id),
+                  avail_GO_MF = unique(subset(Pannzer_TERM2GENE,ontology=="MF")$gene_id)))
+
+#Make a venn diagram to see how many terms we have for each ontology (wgcna_genes)
+gplots::venn(list(de_genes = unique(wgcna_genes$Gene),
+                  avail_GO_BP = unique(subset(Pannzer_TERM2GENE,ontology=="BP")$gene_id),
+                  avail_GO_CC = unique(subset(Pannzer_TERM2GENE,ontology=="CC")$gene_id),
+                  avail_GO_MF = unique(subset(Pannzer_TERM2GENE,ontology=="MF")$gene_id)))
+```
+Build OrgDB. Should be run once
+```{r eval=TRUE}
+if (!require("org.Mcinxia.eg.db", quietly = TRUE)){
+    library(AnnotationForge,verbose = FALSE)
+    library(stringr,verbose = FALSE)
+    
+    gene_info <- SummarizedExperiment::rowData(smrExpt) %>% as.data.frame() %>% dplyr::select(gene_id,dros_name) 
+    
+    cGO <- Pannzer_TERM2GENE[,c(2,1)]
+    cGO <- cGO %>% mutate(across(term, \(x) str_replace(x, '.._', 'GO:')),EVIDENCE="IEA")
+    colnames(cGO) <- c("GID","GO","EVIDENCE")
+    
+    cGO <- cGO %>% left_join(gene_info, by =c("GID"="gene_id")) %>% as.data.frame()
+    
+    cSym <- cGO %>% dplyr::select(GID, dros_name) %>% distinct()
+    cSym$GENENAME <- cSym$dros_name#,GENENAME="dummy")
+    
+    colnames(cSym) <- c("GID","SYMBOL","GENENAME")
+    
+    makeOrgPackage(gene_info=cSym , 
+                   # chromosome=fChr, 
+                   go=cGO %>% dplyr::select(GID,GO,EVIDENCE) %>% distinct() ,
+                   version="0.2",
+                   maintainer="Rishi Das Roy<rishi.dasroy@helsinki.fi>",
+                   author="Rishi Das Roy<rishi.dasroy@helsinki.fi>",
+                   outputDir = ".",
+                   tax_id="113334", # Is it good ??
+                   genus="Melitaea",
+                   species="cinxia",
+                   goTable="go")
+         
+    ## then you can call install.packages based on the return value
+    install.packages("./org.Mcinxia.eg.db", repos=NULL)
+} else {
+  print("Custom GO library is installed")
+}
+
+library(org.Mcinxia.eg.db,quietly = TRUE)
+```
+
+Get all the gene lists from DE and WGCNA analysis and perform overrepresentation analysis
+```{r}
+#Compile all data
+all_gene_clusters <- list()
+all_gene_clusters$Temperature_up <- temperature[which(temperature$logFC_temp > 0),]$ID
+all_gene_clusters$Temperature_down <- temperature[which(temperature$logFC_temp < 0),]$ID
+all_gene_clusters$Population_up <- population[which(population$logFC_pop > 0),]$ID
+all_gene_clusters$Population_down <- population[which(population$logFC_pop < 0),]$ID
+all_gene_clusters$Interaction <- interaction$ID
+all_gene_clusters$Black <- wgcna_genes[which(wgcna_genes$Module == "black"), ]$Gene
+all_gene_clusters$Pink <- wgcna_genes[which(wgcna_genes$Module == "pink"), ]$Gene
+all_gene_clusters$Yellow <- wgcna_genes[which(wgcna_genes$Module == "yellow"), ]$Gene
+all_gene_clusters$Salmon <- wgcna_genes[which(wgcna_genes$Module == "salmon"), ]$Gene
+all_gene_clusters$Brown <- wgcna_genes[which(wgcna_genes$Module == "brown"), ]$Gene
+all_gene_clusters$Green <- wgcna_genes[which(wgcna_genes$Module == "green"), ]$Gene
+all_gene_clusters$Tan <- wgcna_genes[which(wgcna_genes$Module == "tan"), ]$Gene
+all_gene_clusters$Blue <- wgcna_genes[which(wgcna_genes$Module == "blue"), ]$Gene
+all_gene_clusters$Cyan <- wgcna_genes[which(wgcna_genes$Module == "cyan"), ]$Gene
+all_gene_clusters$Greenyellow <- wgcna_genes[which(wgcna_genes$Module == "greenyellow"), ]$Gene
+all_gene_clusters$Lightcyan <- wgcna_genes[which(wgcna_genes$Module == "lightcyan"), ]$Gene
+
+#Do ORA
+comp <- compareCluster(all_gene_clusters, fun = enrichGO,
+                      universe      = allGenes,
+                      OrgDb         = org.Mcinxia.eg.db,
+                      ont           = "BP",
+                      pAdjustMethod = "BH",
+                      pvalueCutoff  = 0.05,
+                      qvalueCutoff  = 0.05,
+                      readable      = TRUE,
+                      keyType = "GID")
+
+#Merge similar GO terms
+comp <- comp %>% simplify( cutoff=0.5, by="p.adjust", select_fun=min) %>% pairwise_termsim()
+
+#Produce and save Figure 3
+Figure3 <- dotplot(comp, showCategory = 5, label_format = 100)
+
+library(ggplot2)
+
+ggsave("Figure3_preprocessing.png", plot = Figure3, width = 40, height = 40, units = "cm", bg = "white", dpi = 300)
+
+```
+
+
+
+<details>
+
+<summary>
+
+<p style="color:red">
+
+sessionInfo
+
+</p>
+
+</summary>
+
+```{r echo=FALSE,message=FALSE,warning=FALSE,error=FALSE}
+sessionInfo()
+```
+
+</details>
